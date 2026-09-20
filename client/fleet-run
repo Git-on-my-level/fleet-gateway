@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+usage() { echo 'Usage: fleet-run run "script" [--timeout S] [--no-wait] [--json] [--host URL] | status|cancel|log ID [--host URL] | health|whoami [--host URL]' >&2; exit 2; }
+fail() { echo "fleet-run: $*" >&2; exit 2; }
+command -v python3 >/dev/null || fail 'python3 is required'
+[ "$#" -gt 0 ] || usage
+verb=$1; shift
+arg=; host=${FLEET_GATEWAY_HOST:-}; timeout=900; wait_job=1; json=0
+case "$verb" in
+    run|status|cancel|log) [ "$#" -gt 0 ] || usage; arg=$1; shift ;;
+    health|whoami) ;;
+    *) usage ;;
+esac
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --host) [ "$#" -ge 2 ] || usage; host=$2; shift 2 ;;
+        --timeout) [ "$#" -ge 2 ] || usage; timeout=$2; shift 2 ;;
+        --no-wait) wait_job=0; shift ;;
+        --json) json=1; shift ;;
+        *) usage ;;
+    esac
+done
+[ -n "$host" ] || fail 'set FLEET_GATEWAY_HOST or pass --host URL'
+case "$host" in http://*|https://*) ;; *) host="http://$host" ;; esac
+host=${host%/}
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+request() {
+    method=$1; path=$2; output=$3
+    shift 3
+    if ! code=$(curl --silent --show-error --connect-timeout 5 --max-time 40 -D "$tmp/headers" -o "$output" -w '%{http_code}' -X "$method" "$host$path" "$@"); then
+        fail 'transport error'
+    fi
+    case "$code" in 2??) ;; *) cat "$output" >&2; tr -d '\r' < "$tmp/headers" | sed -n '/^[Rr]etry-[Aa]fter:/p' >&2; fail "HTTP $code" ;; esac
+}
+field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+case "$verb" in
+    health|whoami) request GET "/$verb" "$tmp/body"; cat "$tmp/body"; echo; exit 0 ;;
+    log) request GET "/jobs/$arg/log" "$tmp/body"; cat "$tmp/body"; exit 0 ;;
+    cancel) request DELETE "/jobs/$arg" "$tmp/body"; cat "$tmp/body"; echo; exit 0 ;;
+    status) request GET "/jobs/$arg" "$tmp/body"; cat "$tmp/body"; echo
+        state=$(field "$tmp/body" state)
+        case "$state" in failed|timed_out|cancelled) exit 1 ;; *) exit 0 ;; esac ;;
+    run)
+        if ! python3 -c 'import json,sys,uuid; print(json.dumps(dict(script=sys.argv[1],timeout_seconds=int(sys.argv[2]),idempotency_key=str(uuid.uuid4()))))' "$arg" "$timeout" > "$tmp/request"; then usage; fi
+        request POST /jobs "$tmp/body" -H 'Content-Type: application/json' --data-binary "@$tmp/request"
+        id=$(field "$tmp/body" job_id)
+        case "$id" in ''|*[!a-f0-9]*) fail 'invalid job id from server' ;; esac
+        [ "${#id}" -eq 32 ] || fail 'invalid job id from server'
+        if [ "$wait_job" -eq 0 ]; then
+            if [ "$json" -eq 1 ]; then cat "$tmp/body"; echo; else echo "$id"; fi
+            exit 0
+        fi ;;
+esac
+while :; do
+    request GET "/jobs/$id" "$tmp/status"
+    state=$(field "$tmp/status" state)
+    echo "$id $state" >&2
+    case "$state" in queued|running) sleep 5 ;; *) break ;; esac
+done
+request GET "/jobs/$id/log" "$tmp/log"
+tail -n 30 "$tmp/log" >&2
+echo "exit_code=$(field "$tmp/status" exit_code)" >&2
+if python3 -c 'import json,sys; sys.exit("work.tar.gz" not in json.load(open(sys.argv[1]))["artifacts"])' "$tmp/status"; then
+    request GET "/jobs/$id/artifacts/work.tar.gz" "$tmp/work.tar.gz"
+    python3 -c 'import sys; assert open(sys.argv[1],"rb").read(2)==b"\x1f\x8b", "not gzip"' "$tmp/work.tar.gz" || fail 'invalid gzip archive'
+    tar -tzf "$tmp/work.tar.gz" > /dev/null || fail 'invalid tar archive'
+    # Validate paths AND member types before BSD/GNU tar extraction.
+    python3 - "$tmp/work.tar.gz" <<'PY' || exit 2
+import pathlib, sys, tarfile
+with tarfile.open(sys.argv[1], 'r:gz') as archive:
+    for item in archive:
+        path = pathlib.PurePosixPath(item.name)
+        if path.is_absolute() or '..' in path.parts or not item.isfile():
+            sys.exit('fleet-run: unsafe tar member: ' + item.name)
+PY
+    destination="./fleet-run-artifacts-$id"
+    mkdir "$destination" || fail 'artifact directory already exists; refusing overwrite'
+    tar -xzf "$tmp/work.tar.gz" -C "$destination" || fail 'extraction failed'
+    echo "artifacts: $destination" >&2
+else
+    echo "fleet-run: note: no artifacts published (put script outputs in /work/work/)" >&2
+fi
+if [ "$json" -eq 1 ]; then cat "$tmp/status"; echo; fi
+[ "$state" = succeeded ] || exit 1

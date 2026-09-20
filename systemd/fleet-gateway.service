@@ -1,0 +1,16 @@
+[Unit]
+Description=Fleet disposable shell gateway
+After=network-online.target docker.service tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/fleet-gateway/config.env
+ExecStart=/usr/bin/python3 /opt/fleet-gateway/fleet_gateway.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=45
+UMask=0022
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+FROM debian:stable-slim
+LABEL fleet-gateway.image="worker-v1"
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates git curl python3 build-essential nodejs npm procps && rm -rf /var/lib/apt/lists/* && useradd --uid 10001 --create-home worker
+USER worker
+WORKDIR /work

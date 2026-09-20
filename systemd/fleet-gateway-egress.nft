@@ -1,0 +1,11 @@
+# Only forwarded traffic arriving from Docker bridges; host/Tailscale unaffected.
+add table inet fleet_gateway
+flush table inet fleet_gateway
+add chain inet fleet_gateway forward { type filter hook forward priority -10; policy accept; }
+add rule inet fleet_gateway forward iifname "docker0" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8 } drop
+add rule inet fleet_gateway forward iifname "br-*" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 127.0.0.0/8 } drop
+add rule inet fleet_gateway forward iifname "docker0" ip6 daddr { fc00::/7, fe80::/10, ::1/128 } drop
+add rule inet fleet_gateway forward iifname "br-*" ip6 daddr { fc00::/7, fe80::/10, ::1/128 } drop
+add chain inet fleet_gateway input { type filter hook input priority -10; policy accept; }
+add rule inet fleet_gateway input iifname "docker0" drop
+add rule inet fleet_gateway input iifname "br-*" drop

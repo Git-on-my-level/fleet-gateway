@@ -1,0 +1,7 @@
+scratch/
+fleet-run-artifacts-*/
+artifacts/
+*.log
+__pycache__/
+*.py[cod]
+.DS_Store
